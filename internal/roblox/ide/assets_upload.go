@@ -14,15 +14,14 @@ import (
 var (
 	ErrRateLimited = fmt.Errorf("rate limited")
 	ErrBadRequest  = fmt.Errorf("bad request")
+	ErrEmptyFile   = fmt.Errorf("file content is empty")
 )
 
-// setAPIKeyHeader adds the Open Cloud API key header to a request.
 func setAPIKeyHeader(req *http.Request, apiKey string) {
 	req.Header.Set("x-api-key", apiKey)
 }
 
-// newCreateAssetRequest builds a multipart HTTP request for asset creation.
-func newCreateAssetRequest(apiKey string, assetType string, name string, description string, fileData []byte, fileName string) (*http.Request, error) {
+func newCreateAssetRequest(apiKey, assetType, name, description string, fileData []byte, fileName string) (*http.Request, error) {
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
@@ -51,8 +50,7 @@ func newCreateAssetRequest(apiKey string, assetType string, name string, descrip
 	return req, nil
 }
 
-// pollOperation repeatedly checks the asset creation operation until it completes.
-func pollOperation(client *http.Client, apiKey string, operationID string) (string, error) {
+func pollOperation(client *http.Client, apiKey, operationID string) (string, error) {
 	url := fmt.Sprintf("https://apis.roblox.com/assets/v1/operations/%s", operationID)
 	for {
 		req, err := http.NewRequest("GET", url, nil)
@@ -76,11 +74,11 @@ func pollOperation(client *http.Client, apiKey string, operationID string) (stri
 		}
 
 		var result struct {
-			Done       bool   `json:"done"`
-			Response   struct {
+			Done     bool `json:"done"`
+			Response struct {
 				AssetID string `json:"assetId"`
 			} `json:"response"`
-			Error      struct {
+			Error struct {
 				Code    string `json:"code"`
 				Message string `json:"message"`
 			} `json:"error"`
@@ -92,7 +90,7 @@ func pollOperation(client *http.Client, apiKey string, operationID string) (stri
 		if result.Done {
 			if result.Error.Code != "" {
 				if strings.Contains(result.Error.Message, "inappropriate") {
-					return "", fmt.Errorf("inappropriate content")
+					return "", fmt.Errorf("inappropriate name or description")
 				}
 				return "", fmt.Errorf("operation failed: %s", result.Error.Message)
 			}
@@ -102,7 +100,6 @@ func pollOperation(client *http.Client, apiKey string, operationID string) (stri
 	}
 }
 
-// parseAssetID extracts the operation ID from a create response.
 func parseAssetID(resp *http.Response) (string, error) {
 	var result struct {
 		OperationID string `json:"operationId"`
@@ -113,14 +110,30 @@ func parseAssetID(resp *http.Response) (string, error) {
 	return result.OperationID, nil
 }
 
-// UploadAssetUsingOpenCloud creates an asset via the Open Cloud API and returns its asset ID.
 func UploadAssetUsingOpenCloud(apiKey, assetType, name, description string, fileData []byte, fileName string) (string, error) {
+	// Guard against truly empty files
+	if len(fileData) == 0 {
+		return "", fmt.Errorf("%w: asset file is empty (name=%q, type=%q)", ErrEmptyFile, name, assetType)
+	}
+
 	client := &http.Client{Timeout: 30 * time.Second}
 
 	req, err := newCreateAssetRequest(apiKey, assetType, name, description, fileData, fileName)
 	if err != nil {
 		return "", err
 	}
+
+	// ---------- DEBUG: log file and body sizes ----------
+	bodySize := 0
+	if req.Body != nil {
+		// Read body to get length (will be rebuilt by http.NewRequest if needed, but we can just check the buffer)
+		// Since we used a bytes.Buffer, we can cast it back to get the length.
+		if buf, ok := req.Body.(*bytes.Buffer); ok {
+			bodySize = buf.Len()
+		}
+	}
+	fmt.Printf("DEBUG: uploading asset=%q type=%q fileSize=%d bodySize=%d\n", name, assetType, len(fileData), bodySize)
+	// ----------------------------------------------------
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -144,9 +157,9 @@ func UploadAssetUsingOpenCloud(apiKey, assetType, name, description string, file
 		return "", err
 	}
 
-	assetID, err := pollOperation(client, apiKey, operationID)
+	assetIDStr, err := pollOperation(client, apiKey, operationID)
 	if err != nil {
 		return "", err
 	}
-	return assetID, nil
+	return assetIDStr, nil
 }
