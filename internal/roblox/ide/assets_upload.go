@@ -30,7 +30,7 @@ func newCreateAssetRequest(apiKey string, assetType string, name string, descrip
 	_ = writer.WriteField("displayName", name)
 	_ = writer.WriteField("description", description)
 
-	part, err := writer.CreateFormFile("file", fileName)
+	part, err := writer.CreateFormFile("fileContent", fileName)
 	if err != nil {
 		return nil, fmt.Errorf("create form file: %w", err)
 	}
