@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 
+	"github.com/kartFr/Asset-Reuploader/internal/app/config"   // <-- NEW
 	"github.com/kartFr/Asset-Reuploader/internal/roblox"
 )
 
@@ -57,7 +58,33 @@ func NewUploadAnimationHandler(
 	data *bytes.Buffer,
 	groupID ...int64,
 ) (func() (int64, error), error) {
-	group := groupID[0]
+	group := int64(0)
+	if len(groupID) > 0 {
+		group = groupID[0]
+	}
+
+	// Check for Open Cloud API key
+	apiKey := config.Get("api_key")
+	if apiKey != "" {
+		// Use new Open Cloud upload
+		fileData := data.Bytes()
+		if fileData == nil {
+			fileData = []byte{}
+		}
+		return func() (int64, error) {
+			assetIDStr, err := UploadAssetUsingOpenCloud(apiKey, "Animation", name, description, fileData, "animation.rbxm") // assuming .rbxm, adjust if needed
+			if err != nil {
+				return 0, err
+			}
+			assetID, err := strconv.ParseInt(assetIDStr, 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid asset id returned: %s", assetIDStr)
+			}
+			return assetID, nil
+		}, nil
+	}
+
+	// Fallback to old method
 	req, err := newUploadAnimationRequest(group, name, description, data)
 	if err != nil {
 		return func() (int64, error) { return 0, nil }, err
