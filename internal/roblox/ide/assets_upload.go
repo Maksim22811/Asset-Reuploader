@@ -7,7 +7,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"strconv"
 	"time"
 )
 
@@ -31,17 +30,17 @@ type assetRequest struct {
 }
 
 type creationContext struct {
-	GroupID int64 `json:"groupId,omitempty"`
+	GroupID *int64  `json:"groupId,omitempty"`
+	Creator *creator `json:"creator,omitempty"`
+}
+
+type creator struct {
+	UserID int64 `json:"userId"`
 }
 
 // UploadAssetUsingOpenCloud uploads an asset via the Open Cloud API.
-// apiKey: your Open Cloud key (with Assets API access).
-// assetType: "Animation", "MeshPart", etc.
-// name, description: asset metadata.
-// fileData: the raw file bytes.
-// fileName: a suggested filename (ignored by the API, but required by multipart).
-// groupID: if > 0, uploads to that group.
-func UploadAssetUsingOpenCloud(apiKey, assetType, name, description string, fileData []byte, fileName string, groupID int64) (string, error) {
+// userID is required only when groupID is 0 (personal upload).
+func UploadAssetUsingOpenCloud(apiKey, assetType, name, description string, fileData []byte, fileName string, groupID int64, userID int64) (string, error) {
 	if len(fileData) == 0 {
 		return "", fmt.Errorf("%w: asset file is empty (name=%q, type=%q)", ErrEmptyFile, name, assetType)
 	}
@@ -53,7 +52,9 @@ func UploadAssetUsingOpenCloud(apiKey, assetType, name, description string, file
 		Description: description,
 	}
 	if groupID > 0 {
-		reqData.CreationContext = &creationContext{GroupID: groupID}
+		reqData.CreationContext = &creationContext{GroupID: &groupID}
+	} else {
+		reqData.CreationContext = &creationContext{Creator: &creator{UserID: userID}}
 	}
 
 	reqJSON, err := json.Marshal(reqData)
@@ -109,7 +110,6 @@ func UploadAssetUsingOpenCloud(apiKey, assetType, name, description string, file
 	}
 
 	if resp.StatusCode != 200 {
-		// Check for inappropriate content
 		if bytes.Contains(respBody, []byte("inappropriate")) {
 			return "", fmt.Errorf("inappropriate name or description")
 		}
@@ -169,7 +169,7 @@ func pollOperation(apiKey, operationID string) (string, error) {
 			} `json:"error"`
 		}
 		if err := json.Unmarshal(body, &result); err != nil {
-			return "", fmt.Errorf("decode poll response: %w", err)
+			return "", err
 		}
 
 		if result.Done {
