@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 
+	"github.com/kartFr/Asset-Reuploader/internal/app/config"
 	"github.com/kartFr/Asset-Reuploader/internal/roblox"
 )
 
@@ -23,30 +24,23 @@ var UploadAnimationErrors = struct {
 }
 
 func newAnimationURL(groupID int64, name, description string) string {
-	url := fmt.Sprintf("https://www.roblox.com/ide/publish/UploadNewAnimation?assetTypeName=Animation&name=%s&description=%s",
+	u := fmt.Sprintf("https://www.roblox.com/ide/publish/UploadNewAnimation?assetTypeName=Animation&name=%s&description=%s",
 		url.QueryEscape(name),
 		url.QueryEscape(description),
 	)
 	if groupID > 0 {
-		url += fmt.Sprintf("&groupId=%d", groupID)
+		u += fmt.Sprintf("&groupId=%d", groupID)
 	}
-
-	return url
+	return u
 }
 
-func newUploadAnimationRequest(
-	groupID int64,
-	name,
-	description string,
-	data *bytes.Buffer,
-) (*http.Request, error) {
+func newUploadAnimationRequest(groupID int64, name, description string, data *bytes.Buffer) (*http.Request, error) {
 	url := newAnimationURL(groupID, name, description)
 	req, err := http.NewRequest("POST", url, data)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "RobloxStudio/WinInet")
-
 	return req, nil
 }
 
@@ -57,7 +51,34 @@ func NewUploadAnimationHandler(
 	data *bytes.Buffer,
 	groupID ...int64,
 ) (func() (int64, error), error) {
-	group := groupID[0]
+	group := int64(0)
+	if len(groupID) > 0 {
+		group = groupID[0]
+	}
+
+	// Check for Open Cloud API key
+	apiKey := config.Get("api_key")
+	if apiKey != "" {
+		// Use Open Cloud upload
+		fileData := data.Bytes()
+		if fileData == nil {
+			fileData = []byte{}
+		}
+		// The Open Cloud function needs a fileName; we just use "animation.rbxm"
+		return func() (int64, error) {
+			assetIDStr, err := UploadAssetUsingOpenCloud(apiKey, "Animation", name, description, fileData, "animation.rbxm", group)
+			if err != nil {
+				return 0, err
+			}
+			assetID, err := strconv.ParseInt(assetIDStr, 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid asset id returned: %s", assetIDStr)
+			}
+			return assetID, nil
+		}, nil
+	}
+
+	// Fallback to cookie-based upload
 	req, err := newUploadAnimationRequest(group, name, description, data)
 	if err != nil {
 		return func() (int64, error) { return 0, nil }, err
@@ -87,7 +108,6 @@ func NewUploadAnimationHandler(
 			if err != nil {
 				return 0, err
 			}
-
 			return id, nil
 		case http.StatusForbidden:
 			if strBody := string(body); strBody == "NotLoggedIn" {
@@ -96,14 +116,12 @@ func NewUploadAnimationHandler(
 				c.SetToken(resp.Header.Get("x-csrf-token"))
 				return 0, UploadAnimationErrors.ErrTokenInvalid
 			}
-
 			return 0, errors.New(resp.Status)
 		case http.StatusUnprocessableEntity:
 			if string(body) == "Inappropriate name or description." {
 				req, _ = newUploadAnimationRequest(group, "[Censored]", description, data)
 				return 0, UploadAnimationErrors.ErrInappropriateName
 			}
-
 			return 0, errors.New(resp.Status)
 		default:
 			return 0, errors.New(resp.Status)
