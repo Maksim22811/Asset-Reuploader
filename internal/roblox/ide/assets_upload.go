@@ -7,7 +7,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"strings"
+	"strconv"
 	"time"
 )
 
@@ -17,41 +17,125 @@ var (
 	ErrEmptyFile   = fmt.Errorf("file content is empty")
 )
 
+// setAPIKeyHeader adds the Open Cloud API key header.
 func setAPIKeyHeader(req *http.Request, apiKey string) {
 	req.Header.Set("x-api-key", apiKey)
 }
 
-func newCreateAssetRequest(apiKey, assetType, name, description string, fileData []byte, fileName string) (*http.Request, error) {
+// assetRequest is the JSON structure for the "request" part of the multipart body.
+type assetRequest struct {
+	AssetType       string          `json:"assetType"`
+	DisplayName     string          `json:"displayName"`
+	Description     string          `json:"description"`
+	CreationContext *creationContext `json:"creationContext,omitempty"`
+}
+
+type creationContext struct {
+	GroupID int64 `json:"groupId,omitempty"`
+}
+
+// UploadAssetUsingOpenCloud uploads an asset via the Open Cloud API.
+// apiKey: your Open Cloud key (with Assets API access).
+// assetType: "Animation", "MeshPart", etc.
+// name, description: asset metadata.
+// fileData: the raw file bytes.
+// fileName: a suggested filename (ignored by the API, but required by multipart).
+// groupID: if > 0, uploads to that group.
+func UploadAssetUsingOpenCloud(apiKey, assetType, name, description string, fileData []byte, fileName string, groupID int64) (string, error) {
+	if len(fileData) == 0 {
+		return "", fmt.Errorf("%w: asset file is empty (name=%q, type=%q)", ErrEmptyFile, name, assetType)
+	}
+
+	// Build the JSON request part
+	reqData := assetRequest{
+		AssetType:   assetType,
+		DisplayName: name,
+		Description: description,
+	}
+	if groupID > 0 {
+		reqData.CreationContext = &creationContext{GroupID: groupID}
+	}
+
+	reqJSON, err := json.Marshal(reqData)
+	if err != nil {
+		return "", fmt.Errorf("marshal asset request: %w", err)
+	}
+
+	// Build multipart body
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
-	_ = writer.WriteField("assetType", assetType)
-	_ = writer.WriteField("displayName", name)
-	_ = writer.WriteField("description", description)
-
-	part, err := writer.CreateFormFile("fileContent", fileName)
+	// Part 1: "request"
+	reqPart, err := writer.CreateFormField("request")
 	if err != nil {
-		return nil, fmt.Errorf("create form file: %w", err)
+		return "", fmt.Errorf("create request field: %w", err)
 	}
-	if _, err := part.Write(fileData); err != nil {
-		return nil, fmt.Errorf("write file data: %w", err)
-	}
-	if err := writer.Close(); err != nil {
-		return nil, fmt.Errorf("close writer: %w", err)
+	if _, err := reqPart.Write(reqJSON); err != nil {
+		return "", fmt.Errorf("write request JSON: %w", err)
 	}
 
+	// Part 2: "fileContent"
+	filePart, err := writer.CreateFormFile("fileContent", fileName)
+	if err != nil {
+		return "", fmt.Errorf("create fileContent field: %w", err)
+	}
+	if _, err := filePart.Write(fileData); err != nil {
+		return "", fmt.Errorf("write file data: %w", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("close writer: %w", err)
+	}
+
+	// Create HTTP request
 	req, err := http.NewRequest("POST", "https://apis.roblox.com/assets/v1/assets", body)
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return "", fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	setAPIKeyHeader(req, apiKey)
 
-	return req, nil
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == 429 {
+		return "", ErrRateLimited
+	}
+
+	if resp.StatusCode != 200 {
+		// Check for inappropriate content
+		if bytes.Contains(respBody, []byte("inappropriate")) {
+			return "", fmt.Errorf("inappropriate name or description")
+		}
+		return "", fmt.Errorf("create asset failed (%d): %s", resp.StatusCode, string(respBody))
+	}
+
+	// Parse the operation ID from the response
+	var createResult struct {
+		OperationID string `json:"operationId"`
+	}
+	if err := json.Unmarshal(respBody, &createResult); err != nil {
+		return "", fmt.Errorf("parse operation id: %w, body: %s", err, string(respBody))
+	}
+
+	// Poll for completion
+	assetIDStr, err := pollOperation(apiKey, createResult.OperationID)
+	if err != nil {
+		return "", err
+	}
+	return assetIDStr, nil
 }
 
-func pollOperation(client *http.Client, apiKey, operationID string) (string, error) {
+func pollOperation(apiKey, operationID string) (string, error) {
 	url := fmt.Sprintf("https://apis.roblox.com/assets/v1/operations/%s", operationID)
+	client := &http.Client{Timeout: 30 * time.Second}
+
 	for {
 		req, err := http.NewRequest("GET", url, nil)
 		if err != nil {
@@ -65,101 +149,39 @@ func pollOperation(client *http.Client, apiKey, operationID string) (string, err
 		}
 		defer resp.Body.Close()
 
+		body, _ := io.ReadAll(resp.Body)
+
 		if resp.StatusCode == 429 {
 			return "", ErrRateLimited
 		}
 		if resp.StatusCode != 200 {
-			body, _ := io.ReadAll(resp.Body)
 			return "", fmt.Errorf("poll failed (%d): %s", resp.StatusCode, string(body))
 		}
 
 		var result struct {
-			Done     bool `json:"done"`
-			Response struct {
+			Done     bool   `json:"done"`
+			Response *struct {
 				AssetID string `json:"assetId"`
 			} `json:"response"`
-			Error struct {
+			Error *struct {
 				Code    string `json:"code"`
 				Message string `json:"message"`
 			} `json:"error"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return "", err
+		if err := json.Unmarshal(body, &result); err != nil {
+			return "", fmt.Errorf("decode poll response: %w", err)
 		}
 
 		if result.Done {
-			if result.Error.Code != "" {
-				if strings.Contains(result.Error.Message, "inappropriate") {
-					return "", fmt.Errorf("inappropriate name or description")
-				}
-				return "", fmt.Errorf("operation failed: %s", result.Error.Message)
+			if result.Error != nil {
+				return "", fmt.Errorf("operation error: %s - %s", result.Error.Code, result.Error.Message)
+			}
+			if result.Response == nil {
+				return "", fmt.Errorf("no asset id in response")
 			}
 			return result.Response.AssetID, nil
 		}
+
 		time.Sleep(2 * time.Second)
 	}
-}
-
-func parseAssetID(resp *http.Response) (string, error) {
-	var result struct {
-		OperationID string `json:"operationId"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("decode operation id: %w", err)
-	}
-	return result.OperationID, nil
-}
-
-func UploadAssetUsingOpenCloud(apiKey, assetType, name, description string, fileData []byte, fileName string) (string, error) {
-	// Guard against truly empty files
-	if len(fileData) == 0 {
-		return "", fmt.Errorf("%w: asset file is empty (name=%q, type=%q)", ErrEmptyFile, name, assetType)
-	}
-
-	client := &http.Client{Timeout: 30 * time.Second}
-
-	req, err := newCreateAssetRequest(apiKey, assetType, name, description, fileData, fileName)
-	if err != nil {
-		return "", err
-	}
-
-	// ---------- DEBUG: log file and body sizes ----------
-	bodySize := 0
-	if req.Body != nil {
-		// Read body to get length (will be rebuilt by http.NewRequest if needed, but we can just check the buffer)
-		// Since we used a bytes.Buffer, we can cast it back to get the length.
-		if buf, ok := req.Body.(*bytes.Buffer); ok {
-			bodySize = buf.Len()
-		}
-	}
-	fmt.Printf("DEBUG: uploading asset=%q type=%q fileSize=%d bodySize=%d\n", name, assetType, len(fileData), bodySize)
-	// ----------------------------------------------------
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 429 {
-		return "", ErrRateLimited
-	}
-	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		if strings.Contains(string(body), "inappropriate") {
-			return "", fmt.Errorf("inappropriate name or description")
-		}
-		return "", fmt.Errorf("create asset failed (%d): %s", resp.StatusCode, string(body))
-	}
-
-	operationID, err := parseAssetID(resp)
-	if err != nil {
-		return "", err
-	}
-
-	assetIDStr, err := pollOperation(client, apiKey, operationID)
-	if err != nil {
-		return "", err
-	}
-	return assetIDStr, nil
 }
