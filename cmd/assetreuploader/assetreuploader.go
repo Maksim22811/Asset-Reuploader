@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/kartFr/Asset-Reuploader/internal/app/config"
@@ -21,8 +22,10 @@ var (
 func main() {
 	console.ClearScreen()
 
-	// ---------- NEW: ask for API key if not set ----------
+	// Prompt for API key if not set
 	ensureAPIKey()
+	// Prompt for Roblox user ID if not set
+	ensureUserID()
 
 	fmt.Println("Authenticating cookie...")
 
@@ -76,7 +79,7 @@ func getCookie(c *roblox.Client) {
 	}
 }
 
-// ---------- NEW: Open Cloud API key prompt ----------
+// ---------- Open Cloud API key prompt ----------
 func ensureAPIKey() {
 	if strings.TrimSpace(config.Get("api_key")) != "" {
 		return
@@ -99,6 +102,36 @@ func ensureAPIKey() {
 			fmt.Printf("Warning: could not save config: %v\n", err)
 		} else {
 			fmt.Println("API key saved successfully.")
+		}
+	}
+}
+
+// ---------- Roblox User ID prompt ----------
+func ensureUserID() {
+	if idStr := strings.TrimSpace(config.Get("user_id")); idStr != "" {
+		if _, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+			return // valid user ID already set
+		}
+	}
+
+	fmt.Println("To upload assets via Open Cloud, your Roblox User ID is required.")
+	fmt.Println("You can find it in your profile URL: https://www.roblox.com/users/261/profile (the number is your ID).")
+	idStr, err := console.Input("Roblox User ID (leave blank to skip): ")
+	if err != nil {
+		fmt.Printf("Failed to read input: %v\n", err)
+		return
+	}
+	idStr = strings.TrimSpace(idStr)
+	if idStr != "" {
+		if _, err := strconv.ParseInt(idStr, 10, 64); err != nil {
+			fmt.Println("Invalid User ID - must be a number. Skipping.")
+			return
+		}
+		config.Set("user_id", idStr)
+		if err := config.Save(); err != nil {
+			fmt.Printf("Warning: could not save config: %v\n", err)
+		} else {
+			fmt.Println("User ID saved successfully.")
 		}
 	}
 }
