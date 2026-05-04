@@ -11,7 +11,8 @@ var (
 	currentConfig = map[string]string{
 		"cookie_file": "cookie.txt",
 		"port":        "8976",
-		"api_key":     "",       // <-- NEW
+		"api_key":     "",
+		"user_id":     "",   // <-- NEW
 	}
 	configPath = "config.ini"
 )
