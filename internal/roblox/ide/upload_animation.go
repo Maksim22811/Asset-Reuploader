@@ -59,14 +59,20 @@ func NewUploadAnimationHandler(
 	// Check for Open Cloud API key
 	apiKey := config.Get("api_key")
 	if apiKey != "" {
-		// Use Open Cloud upload
+		// Read user ID from config (needed for personal uploads)
+		userIDStr := config.Get("user_id")
+		userID, err := strconv.ParseInt(userIDStr, 10, 64)
+		if err != nil || userID == 0 {
+			return func() (int64, error) { return 0, fmt.Errorf("invalid user_id in config. Please set your Roblox user ID (number) in config.ini under 'user_id'") }, nil
+		}
+
 		fileData := data.Bytes()
 		if fileData == nil {
 			fileData = []byte{}
 		}
-		// The Open Cloud function needs a fileName; we just use "animation.rbxm"
+
 		return func() (int64, error) {
-			assetIDStr, err := UploadAssetUsingOpenCloud(apiKey, "Animation", name, description, fileData, "animation.rbxm", group)
+			assetIDStr, err := UploadAssetUsingOpenCloud(apiKey, "Animation", name, description, fileData, "animation.rbxm", group, userID)
 			if err != nil {
 				return 0, err
 			}
